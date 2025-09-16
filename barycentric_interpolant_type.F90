@@ -365,7 +365,7 @@ module math
   use set_precision, only : dp
   implicit none
   private
-  public :: cross_product, vector_norm
+  public :: cross_product
 contains
 
   pure function cross_product( vec1, vec2 )
@@ -375,19 +375,6 @@ contains
     cross_product(2) = -( vec1(1)*vec2(3) - vec1(3)*vec2(1) )
     cross_product(3) =  ( vec1(1)*vec2(2) - vec1(2)*vec2(1) )
   end function cross_product
-
-  pure function vector_norm( vector )
-    use set_precision, only : dp
-    use set_constants, only : zero
-    real(dp), dimension(:), intent(in) :: vector
-    real(dp)                           :: vector_norm
-    integer :: i
-    vector_norm = zero
-    do i = 1, size(vector)
-      vector_norm = vector_norm + vector(i)**2
-    end do
-    vector_norm = sqrt( vector_norm )
-  end function vector_norm
 
 end module math
 
@@ -568,26 +555,30 @@ module barycentric_interpolant_derived_type
   private
   public :: interpolant_t
 
-  if ( allocated(Dmat) ) deallocate(Dmat)
-    if ( allocated(xb) )   deallocate(xb)
-    if ( allocated(wb) )   deallocate(wb)
-    allocate( Dmat(Nmax,Nmax,Nmax,2), xb(Nmax,Nmax), wb(Nmax,Nmax) )
-    Dmat = zero; xb = zero; wb = zero
-
   type :: interpolant_t
     integer :: Nmax
     real(dp), dimension(:,:),     allocatable :: xb, wb
     real(dp), dimension(:,:,:,:), allocatable :: Dmat
   contains
     private
-    procedure, public, pass :: create  => create_interpolant
-    procedure, public, pass :: destroy => destroy_interpolant
-    procedure,         pass :: lagbary, lagbary
+    procedure, public, nopass :: constructor
+    procedure, public, pass   :: destroy       => destroy_interpolant
+    procedure,         pass   :: lagbary, lagbary_wderiv, lagbary_wderiv2
+    procedure,         pass   :: lagbary_2D, lagbary_2D_wgrad, lagbary_2D_whess
+    procedure,         pass   :: lagbary_3D, lagbary_3D_wgrad, lagbary_3D_whess
+    procedure, public, pass   :: calc_grid_metrics, calc_grid_metrics_alt
+    procedure, public, pass   :: covariant_base_vectors_3D, contravariant_base_vectors_3D
+    procedure, public, pass   :: normal_vectors, jacobian_determinant_2D, jacobian_determinant_3D
   end type interpolant_t
 
   interface interpolant_t
     procedure constructor
   end interface interpolant_t
+
+  interface jacobian_determinant
+    module procedure jacobian_determinant_2D
+    module procedure jacobian_determinant_3D
+  end interface jacobian_determinant
 
 contains
 
@@ -605,31 +596,30 @@ contains
     integer, optional, intent(in) :: N
     type(interpolant_t)           :: this
     integer :: j
-    real(dp) :: x1 = -one, x2 = one
     call this%destroy()
     if ( present(N) ) this%Nmax = max(N,2)
     allocate( this%Dmat(this%Nmax,this%Nmax,this%Nmax,2) )
     allocate(   this%xb(this%Nmax,this%Nmax), this%wb(this%Nmax,this%Nmax) )
-    this%Dmat = zero; xb = zero; wb = zero
+    this%Dmat = zero; this%xb = zero; this%wb = zero
     this%wb(1,1) = one
     do j = 2,this%Nmax
-      this%xb(1:j,j) = linspace(j,x1,x2)
+      this%xb(1:j,j) = linspace(j,-one,one)
       this%wb(1:j,j) = barycentric_weights( this%xb(1:j,j) )
       this%Dmat(1:j,1:j,j,:) = mth_order_polynomial_derivative_matrix( this%xb(1:j,j), this%wb(1:j,j), 2 )
     end do
   end function constructor
 
-  elemental logical function almost_equal(a,b)
+  pure elemental logical function almost_equal(a,b)
     real(dp), intent(in) :: a, b
     logical :: test1, test2, test3
     test1 = ( (a==zero) .or. (b==zero) )
     test2 = ( abs(a-b) <= two*epsilon(one) )
     test3 = ( ( abs(a-b) <= epsilon(abs(a)) ) .and. &
-            ( abs(a-b) <= epsilon(abs(b)) ) )
+              ( abs(a-b) <= epsilon(abs(b)) ) )
     almost_equal = ( ( test1 .and. test2 ) .or. ( (.not. test1) .and. test3 ) )
   end function almost_equal
 
-  function barycentric_weights(x) result(w)
+  pure function barycentric_weights(x) result(w)
     real(dp), dimension(:), intent(in) :: x
     real(dp), dimension(size(x))       :: w
     integer :: j, k, N
@@ -673,7 +663,7 @@ contains
         D(i,i,k) = zero
         do j = 1,N
           if (j/=i) then
-            D(i,j,k) = ( real(k,dp) / (x(i) - x(j)) )                          &
+            D(i,j,k) = ( real(k,dp) / (x(i) - x(j)) )        &
                      * ( w(j)/w(i)*D(i,i,k-1) - D(i,j,k-1) )
             D(i,i,k) = D(i,i,k) - D(i,j,k)
           end if
@@ -683,7 +673,7 @@ contains
   end function mth_order_polynomial_derivative_matrix
 
   pure subroutine lagbary(this,x,dir,fval,Npts,val)
-    type(interpolant_t),    intent(in)  :: this
+    class(interpolant_t),    intent(in)  :: this
     real(dp),               intent(in)  :: x
     integer,                intent(in)  :: dir
     integer,  dimension(:), intent(in)  :: Npts
@@ -692,23 +682,23 @@ contains
     real(dp) :: A, F
     real(dp) :: x1, t1
     integer :: j, N
-    A = zero
-    F = zero
+    A = zero; F = zero
     N = Npts(dir)
     do j = 1,N
-      x1 = xb(j,N) - x
+      x1 = this%xb(j,N) - x
       if ( almost_equal(x1,zero) ) then
         val = fval(j)
         return
       end if
-      t1 = wb(j,N)/x1
+      t1 = this%wb(j,N)/x1
       A = A + t1 * fval(j)
       F = F + t1
     end do
     val = A/F
   end subroutine lagbary
 
-  pure subroutine lagbary_wderiv(x,dir,fval,Npts,val,dval)
+  pure subroutine lagbary_wderiv(this,x,dir,fval,Npts,val,dval)
+    class(interpolant_t),    intent(in)  :: this
     real(dp),               intent(in)  :: x
     integer,                intent(in)  :: dir
     integer,  dimension(:), intent(in)  :: Npts
@@ -717,19 +707,16 @@ contains
     real(dp) :: A, B, C, F
     real(dp) :: x1, t1, t2, FF, AC
     integer :: j, N
-    A = zero
-    B = zero
-    C = zero
-    F = zero
+    A = zero; B = zero; C = zero; F = zero
     N = Npts(dir)
     do j = 1,N
-      x1 = xb(j,N) - x
+      x1 = this%xb(j,N) - x
       if ( almost_equal(x1,zero) ) then
         val = fval(j)
-        dval = dot_product( Dmat(j,1:N,N,1), fval )
+        dval = dot_product( this%Dmat(j,1:N,N,1), fval )
         return
       end if
-      t1 = wb(j,N)/x1
+      t1 = this%wb(j,N)/x1
       A = A + t1 * fval(j)
       F = F + t1
       t2 = t1/x1
@@ -742,7 +729,8 @@ contains
     dval = (B * F - AC)/FF
   end subroutine lagbary_wderiv
 
-  pure subroutine lagbary_wderiv2(x,dir,fval,Npts,val,dval,d2val)
+  pure subroutine lagbary_wderiv2(this,x,dir,fval,Npts,val,dval,d2val)
+    class(interpolant_t),    intent(in)  :: this
     real(dp),               intent(in)  :: x
     integer,                intent(in)  :: dir
     integer,  dimension(:), intent(in)  :: Npts
@@ -751,22 +739,17 @@ contains
     real(dp) :: A, B, C, D, E, F
     real(dp) :: x1, t1, t2, t3, FF, AC
     integer :: j, N
-    A = zero
-    B = zero
-    C = zero
-    D = zero
-    E = zero
-    F = zero
+    A = zero; B = zero; C = zero; D = zero; E = zero; F = zero
     N = Npts(dir)
     do j = 1,N
-      x1 = xb(j,N) - x
+      x1 = this%xb(j,N) - x
       if ( almost_equal(x1,zero) ) then
         val   = fval(j)
-        dval  = dot_product( Dmat(j,1:N,N,1), fval )
-        d2val = dot_product( Dmat(j,1:N,N,2), fval )
+        dval  = dot_product( this%Dmat(j,1:N,N,1), fval )
+        d2val = dot_product( this%Dmat(j,1:N,N,2), fval )
         return
       end if
-      t1 = wb(j,N)/x1
+      t1 = this%wb(j,N)/x1
       A = A + t1 * fval(j)
       F = F + t1
       t2 = t1/x1
@@ -780,11 +763,14 @@ contains
     FF = F*F
     AC = A*C
     dval = (B * F - AC)/FF
-    d2val = ( two * D ) / F - ( two * E * A ) / FF - ( two * B * C ) / FF      &
+    d2val = ( two * D      ) / F          &
+          - ( two * E * A  ) / FF         &
+          - ( two * B * C  ) / FF         &
           + ( two * C * AC ) / ( FF * F )
   end subroutine lagbary_wderiv2
 
-  pure subroutine lagbary_2D(x,fval,Npts,val)
+  pure subroutine lagbary_2D(this,x,fval,Npts,val)
+    class(interpolant_t),      intent(in)  :: this
     real(dp), dimension(2),   intent(in)  :: x
     real(dp), dimension(:,:), intent(in)  :: fval
     integer,  dimension(2),   intent(in)  :: Npts
@@ -792,12 +778,13 @@ contains
     real(dp), dimension(size(fval,2)) :: tmp
     integer :: j
     do j = 1,Npts(2)
-      call lagbary( x(1), 1, fval(:,j), Npts, tmp(j) )
+      call this%lagbary( x(1), 1, fval(:,j), Npts, tmp(j) )
     end do
-    call lagbary( x(2), 2, tmp, Npts, val )
+    call this%lagbary( x(2), 2, tmp, Npts, val )
   end subroutine lagbary_2D
 
-  pure subroutine lagbary_2D_wgrad(x,fval,Npts,val,grad)
+  pure subroutine lagbary_2D_wgrad(this,x,fval,Npts,val,grad)
+    class(interpolant_t),      intent(in)  :: this
     real(dp), dimension(2),   intent(in)  :: x
     real(dp), dimension(:,:), intent(in)  :: fval
     integer,  dimension(2),   intent(in)  :: Npts
@@ -806,13 +793,14 @@ contains
     real(dp), dimension(size(fval,2)) :: tmp, gtmp
     integer :: j
     do j = 1,Npts(2)
-      call lagbary_wderiv( x(1), 1, fval(:,j), Npts, tmp(j), gtmp(j) )
+      call this%lagbary_wderiv( x(1), 1, fval(:,j), Npts, tmp(j), gtmp(j) )
     end do
-    call lagbary_wderiv( x(2), 2,  tmp, Npts, val, grad(2) )
-    call lagbary(        x(2), 2, gtmp, Npts,      grad(1) )
+    call this%lagbary_wderiv( x(2), 2,  tmp, Npts, val, grad(2) )
+    call this%lagbary(        x(2), 2, gtmp, Npts,      grad(1) )
   end subroutine lagbary_2D_wgrad
 
-  pure subroutine lagbary_2D_whess(x,fval,Npts,val,grad,hess)
+  pure subroutine lagbary_2D_whess(this,x,fval,Npts,val,grad,hess)
+    class(interpolant_t),      intent(in)  :: this
     real(dp), dimension(2),   intent(in)  :: x
     real(dp), dimension(:,:), intent(in)  :: fval
     integer,  dimension(2),   intent(in)  :: Npts
@@ -822,14 +810,15 @@ contains
     real(dp), dimension(size(fval,2)) :: tmp, gtmp, htmp
     integer :: j
     do j = 1,Npts(2)
-      call lagbary_wderiv2( x(1), 1, fval(:,j), Npts, tmp(j), gtmp(j), htmp(j) )
+      call this%lagbary_wderiv2( x(1), 1, fval(:,j), Npts, tmp(j), gtmp(j), htmp(j) )
     end do
-    call lagbary_wderiv2( x(2), 2,  tmp, Npts, val, grad(2), hess(3) )
-    call lagbary_wderiv(  x(2), 2, gtmp, Npts,      grad(1), hess(2) )
-    call lagbary(         x(2), 2, htmp, Npts,               hess(1) )
+    call this%lagbary_wderiv2( x(2), 2,  tmp, Npts, val, grad(2), hess(3) )
+    call this%lagbary_wderiv(  x(2), 2, gtmp, Npts,      grad(1), hess(2) )
+    call this%lagbary(         x(2), 2, htmp, Npts,               hess(1) )
   end subroutine lagbary_2D_whess
 
-  pure subroutine lagbary_3D(x,fval,Npts,val)
+  pure subroutine lagbary_3D(this,x,fval,Npts,val)
+    class(interpolant_t),        intent(in)  :: this
     real(dp), dimension(3),     intent(in)  :: x
     real(dp), dimension(:,:,:), intent(in)  :: fval
     integer,  dimension(3),     intent(in)  :: Npts
@@ -839,16 +828,17 @@ contains
     integer :: k, j
     do k = 1,Npts(3)
       do j = 1,Npts(2)
-        call lagbary( x(1), 1, fval(:,j,k), Npts, tmp(j,k) )
+        call this%lagbary( x(1), 1, fval(:,j,k), Npts, tmp(j,k) )
       end do
     end do
     do k = 1,Npts(3)
-      call lagbary( x(2), 2, tmp(:,k), Npts, tmp2(k) )
+      call this%lagbary( x(2), 2, tmp(:,k), Npts, tmp2(k) )
     end do
-    call lagbary( x(3), 3, tmp2, Npts, val )
+    call this%lagbary( x(3), 3, tmp2, Npts, val )
   end subroutine lagbary_3D
 
-  pure subroutine lagbary_3D_wgrad(x,fval,Npts,val,grad)
+  pure subroutine lagbary_3D_wgrad(this,x,fval,Npts,val,grad)
+    class(interpolant_t),        intent(in)  :: this
     real(dp), dimension(3),     intent(in)  :: x
     real(dp), dimension(:,:,:), intent(in)  :: fval
     integer,  dimension(3),     intent(in)  :: Npts
@@ -859,19 +849,20 @@ contains
     integer :: k, j
     do k = 1,Npts(3)
       do j = 1,Npts(2)
-        call lagbary_wderiv( x(1), 1, fval(:,j,k), Npts, tmp(j,k), gtmp0(j,k) )
+        call this%lagbary_wderiv( x(1), 1, fval(:,j,k), Npts, tmp(j,k), gtmp0(j,k) )
       end do
     end do
     do k = 1,Npts(3)
-      call lagbary_wderiv( x(2), 2,   tmp(:,k), Npts, tmp2(k), gtmp2(k) )
-      call lagbary(        x(2), 2, gtmp0(:,k), Npts, gtmp1(k) )
+      call this%lagbary_wderiv( x(2), 2,   tmp(:,k), Npts, tmp2(k), gtmp2(k) )
+      call this%lagbary(        x(2), 2, gtmp0(:,k), Npts, gtmp1(k) )
     end do
-    call lagbary_wderiv( x(3), 3,  tmp2, Npts, val, grad(3) )
-    call lagbary(        x(3), 3, gtmp2, Npts,      grad(2) )
-    call lagbary(        x(3), 3, gtmp1, Npts,      grad(1) )
+    call this%lagbary_wderiv( x(3), 3,  tmp2, Npts, val, grad(3) )
+    call this%lagbary(        x(3), 3, gtmp2, Npts,      grad(2) )
+    call this%lagbary(        x(3), 3, gtmp1, Npts,      grad(1) )
   end subroutine lagbary_3D_wgrad
 
-  pure subroutine lagbary_3D_whess(x,fval,Npts,val,grad,hess)
+  pure subroutine lagbary_3D_whess(this,x,fval,Npts,val,grad,hess)
+    class(interpolant_t),        intent(in)  :: this
     real(dp), dimension(3),     intent(in)  :: x
     real(dp), dimension(:,:,:), intent(in)  :: fval
     integer,  dimension(3),     intent(in)  :: Npts
@@ -883,470 +874,220 @@ contains
     integer :: k, j
     do k = 1,Npts(3)
       do j = 1,Npts(2)
-        call lagbary_wderiv2( x(1), 1, fval(:,j,k), Npts, tmp(j,k), gtmp(j,k), htmp(j,k) )
+        call this%lagbary_wderiv2( x(1), 1, fval(:,j,k), Npts, tmp(j,k), gtmp(j,k), htmp(j,k) )
       end do
     end do
     do k = 1,Npts(3)
-      call lagbary_wderiv2( x(2), 2,  tmp(:,k), Npts, tmp1(k), gtmp2(k), htmp3(k) )
-      call lagbary_wderiv(  x(2), 2, gtmp(:,k), Npts,          gtmp1(k), htmp2(k) )
-      call lagbary(         x(2), 2, htmp(:,k), Npts,                    htmp1(k) )
+      call this%lagbary_wderiv2( x(2), 2,  tmp(:,k), Npts, tmp1(k), gtmp2(k), htmp3(k) )
+      call this%lagbary_wderiv(  x(2), 2, gtmp(:,k), Npts,          gtmp1(k), htmp2(k) )
+      call this%lagbary(         x(2), 2, htmp(:,k), Npts,                    htmp1(k) )
     end do
-    call lagbary_wderiv2( x(3), 3,  tmp1, Npts, val, grad(3), hess(6) )
-    call lagbary_wderiv(  x(3), 3, gtmp2, Npts,      grad(2), hess(5) )
-    call lagbary(         x(3), 3, htmp3, Npts,               hess(4) )
-    call lagbary_wderiv(  x(3), 3, gtmp1, Npts,      grad(1), hess(3) )
-    call lagbary(         x(3), 3, htmp2, Npts,               hess(2) )
-    call lagbary(         x(3), 3, htmp1, Npts,               hess(1) )
+    call this%lagbary_wderiv2( x(3), 3,  tmp1, Npts, val, grad(3), hess(6) )
+    call this%lagbary_wderiv(  x(3), 3, gtmp2, Npts,      grad(2), hess(5) )
+    call this%lagbary(         x(3), 3, htmp3, Npts,               hess(4) )
+    call this%lagbary_wderiv(  x(3), 3, gtmp1, Npts,      grad(1), hess(3) )
+    call this%lagbary(         x(3), 3, htmp2, Npts,               hess(2) )
+    call this%lagbary(         x(3), 3, htmp1, Npts,               hess(1) )
   end subroutine lagbary_3D_whess
 
-end module barycentric_interpolant_derived_type
+  pure function calc_grid_metrics(this,point,X1,X2,X3) result(Ja)
+    use set_constants, only : zero
+    class(interpolant_t),       intent(in) :: this
+    real(dp), dimension(3),     intent(in) :: point
+    real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
+    real(dp), dimension(3,3) :: Ja
+    real(dp), dimension(size(X1,1),size(X1,2),size(X1,3),3) :: X
+    real(dp), dimension(size(X1,1),size(X1,2),size(X1,3))   :: tmp
+    real(dp), dimension(3) :: dX_l, dX_m, dd1, dd2, dd3
+    real(dp) :: junk
+    integer, dimension(3), parameter :: ijk = [1,2,3]
+    integer, dimension(3), parameter :: kij = cshift(ijk,1)
+    integer, dimension(3), parameter :: jki = cshift(kij,1)
+    integer, dimension(3) :: Npts
+    integer :: i
+    Ja = zero
+    Npts = shape(X1)
+    call this%lagbary_3D_wgrad( point, X3, Npts, junk, dX_l )
+    call this%lagbary_3D_wgrad( point, X2, Npts, junk, dX_m )
+    tmp = X3*dX_m(1) - X2*dX_l(1)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd1 )
+    tmp = X3*dX_m(2) - X2*dX_l(2)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd2 )
+    tmp = X3*dX_m(3) - X2*dX_l(3)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd3 )
+    Ja(1,1) = -half*( dd3(2) - dd2(3) );
+    Ja(1,2) = -half*( dd1(3) - dd3(1) );
+    Ja(1,3) = -half*( dd2(1) - dd1(2) );
 
-module lagrange_interpolation
-  use set_precision, only : dp
-  use set_constants, only : zero, one, two, half
-  implicit none
-  private
-  ! public :: xb, wb, Dmat
-  public :: generate_1D_barycentric_info, destroy_1D_barycentric_info
-  public :: lagbary, lagbary_wderiv
-  public :: lagbary_2D, lagbary_2D_wgrad
-  public :: lagbary_3D, lagbary_3D_wgrad
-  public :: calc_grid_metrics, jacobian_determinant
-  public :: normal_vectors
-  interface jacobian_determinant
-    module procedure jacobian_determinant_2D
-    module procedure jacobian_determinant_3D
-  end interface jacobian_determinant
+    call this%lagbary_3D_wgrad( point, X1, Npts, junk, dX_l )
+    call this%lagbary_3D_wgrad( point, X3, Npts, junk, dX_m )
+    tmp = X1*dX_m(1) - X3*dX_l(1)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd1 )
+    tmp = X1*dX_m(2) - X3*dX_l(2)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd2 )
+    tmp = X1*dX_m(3) - X3*dX_l(3)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd3 )
+    Ja(2,1) = -half*( dd3(2) - dd2(3) );
+    Ja(2,2) = -half*( dd1(3) - dd3(1) );
+    Ja(2,3) = -half*( dd2(1) - dd1(2) );
 
-  integer :: Nmax = 10
-  real(dp), dimension(:,:,:,:), allocatable :: Dmat
-  real(dp), dimension(:,:),   allocatable :: xb, wb
-contains
+    call this%lagbary_3D_wgrad( point, X2, Npts, junk, dX_l )
+    call this%lagbary_3D_wgrad( point, X1, Npts, junk, dX_m )
+    tmp = X2*dX_m(1) - X1*dX_l(1)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd1 )
+    tmp = X2*dX_m(2) - X1*dX_l(2)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd2 )
+    tmp = X2*dX_m(3) - X1*dX_l(3)
+    call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd3 )
+    Ja(3,1) = -half*( dd3(2) - dd2(3) );
+    Ja(3,2) = -half*( dd1(3) - dd3(1) );
+    Ja(3,3) = -half*( dd2(1) - dd1(2) );
+  end function calc_grid_metrics
 
-  elemental logical function almost_equal(a,b)
-    real(dp), intent(in) :: a, b
-    logical :: test1, test2, test3
-    test1 = ( (a==zero) .or. (b==zero) )
-    test2 = ( abs(a-b) <= two*epsilon(one) )
-    test3 = ( ( abs(a-b) <= epsilon(abs(a)) ) .and. &
-            ( abs(a-b) <= epsilon(abs(b)) ) )
-    almost_equal = ( ( test1 .and. test2 ) .or. ( (.not. test1) .and. test3 ) )
-  end function almost_equal
-
-  function barycentric_weights(x) result(w)
-    real(dp), dimension(:), intent(in) :: x
-    real(dp), dimension(size(x))       :: w
-    integer :: j, k, N
-    N = size(x)
-    w = one
-    do j = 2,N
-      do k = 1,j-1
-        w(k) = w(k) * ( x(k) - x(j) )
-        w(j) = w(j) * ( x(j) - x(k) )
-      end do
+  pure function calc_grid_metrics_alt(this,point,X1,X2,X3) result(Ja)
+    use set_constants, only : zero
+    class(interpolant_t),       intent(in) :: this
+    real(dp), dimension(3),     intent(in) :: point
+    real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
+    real(dp), dimension(3,3) :: Ja
+    real(dp), dimension(size(X1,1),size(X1,2),size(X1,3),3) :: X
+    real(dp), dimension(size(X1,1),size(X1,2),size(X1,3))   :: tmp
+    real(dp), dimension(3) :: dX_l, dX_m, dd1, dd2, dd3
+    real(dp) :: junk
+    integer, dimension(3), parameter :: ijk = [1,2,3]
+    integer, dimension(3), parameter :: kij = cshift(ijk,1)
+    integer, dimension(3), parameter :: jki = cshift(kij,1)
+    integer, dimension(3) :: Npts
+    integer :: i
+    Ja = zero
+    X(:,:,:,1) = X1
+    X(:,:,:,2) = X2
+    X(:,:,:,3) = X3
+    Npts = shape(X1)
+    do i = 1,3
+      associate( l => kij(i), m => jki(i) )
+        associate( X_l => X(:,:,:,l), X_m => X(:,:,:,m) )
+          call this%lagbary_3D_wgrad( point, X_l, Npts, junk, dX_l )
+          call this%lagbary_3D_wgrad( point, X_m, Npts, junk, dX_m )
+          tmp = X_l*dX_m(1) - X_m*dX_l(1)
+          call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd1 )
+          tmp = X_l*dX_m(2) - X_m*dX_l(2)
+          call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd2 )
+          tmp = X_l*dX_m(3) - X_m*dX_l(3)
+          call this%lagbary_3D_wgrad( point, tmp, Npts, junk, dd3 )
+          Ja(i,1) = -half*( dd3(2) - dd2(3) );
+          Ja(i,2) = -half*( dd1(3) - dd3(1) );
+          Ja(i,3) = -half*( dd2(1) - dd1(2) );
+        end associate
+      end associate
     end do
-    w = one/w
-  end function barycentric_weights
+  end function calc_grid_metrics_alt
 
-  pure function polynomial_derivative_matrix(x,w) result(D)
-    real(dp), dimension(:), intent(in) :: x, w
-    real(dp), dimension(size(x),size(x)) :: D
-    integer :: i, j, N
-    D = zero
-    N = size(x)
-    do i = 1,N
-      do j = 1,N
-        if (j/=i) then
-          D(i,j) = w(j)/w(i) * one / ( x(i) - x(j) )
-          D(i,i) = D(i,i) - D(i,j)
-        end if
-      end do
-    end do
-  end function polynomial_derivative_matrix
-
-  pure function mth_order_polynomial_derivative_matrix(x,w,M) result(D)
-    real(dp), dimension(:), intent(in) :: x, w
-    integer,                intent(in) :: M
-    real(dp), dimension(size(x),size(x),M) :: D
-    integer :: i, j, k, N
-    D = zero
-    N = size(x)
-    D(:,:,1) = polynomial_derivative_matrix(x,w)
-    do k = 2,M
-      do i = 1,N
-        D(i,i,k) = zero
-        do j = 1,N
-          if (j/=i) then
-            D(i,j,k) = ( real(k,dp) / (x(i) - x(j)) )                          &
-                     * ( w(j)/w(i)*D(i,i,k-1) - D(i,j,k-1) )
-            D(i,i,k) = D(i,i,k) - D(i,j,k)
-          end if
-        end do
-      end do
-    end do
-  end function mth_order_polynomial_derivative_matrix
-
-  subroutine generate_1D_barycentric_info(N)
-    use linspace_helper, only : linspace
-    integer, intent(in), optional :: N
-    integer :: j
-    real(dp) :: x1 = -one, x2 = one
-    if ( present(N) ) then
-      if ( N > Nmax ) then
-        Nmax = N
-        continue
-      end if
-    end if
-    if ( allocated(Dmat) ) deallocate(Dmat)
-    if ( allocated(xb) )   deallocate(xb)
-    if ( allocated(wb) )   deallocate(wb)
-    allocate( Dmat(Nmax,Nmax,Nmax,2), xb(Nmax,Nmax), wb(Nmax,Nmax) )
-    Dmat = zero; xb = zero; wb = zero
-    wb(1,1) = one
-    do j = 2,Nmax
-      ! call linspace(x1,x2,xb(1:j,j))
-      xb(1:j,j) = linspace(j,x1,x2)
-      wb(1:j,j) = barycentric_weights( xb(1:j,j) )
-      Dmat(1:j,1:j,j,:) = mth_order_polynomial_derivative_matrix( xb(1:j,j), wb(1:j,j), 2 )
-    end do
-  end subroutine generate_1D_barycentric_info
-
-  subroutine destroy_1D_barycentric_info
-    if ( allocated(Dmat) ) deallocate(Dmat)
-    if ( allocated(xb) ) deallocate(xb)
-    if ( allocated(wb) ) deallocate(wb)
-  end subroutine destroy_1D_barycentric_info
-
-  pure subroutine lagbary(x,dir,fval,Npts,val)
-    real(dp),               intent(in)  :: x
-    integer,                intent(in)  :: dir
-    integer,  dimension(:), intent(in)  :: Npts
-    real(dp), dimension(:), intent(in)  :: fval
-    real(dp),               intent(out) :: val
-    real(dp) :: A, F
-    real(dp) :: x1, t1
-    integer :: j, N
-    A = zero
-    F = zero
-    N = Npts(dir)
-    do j = 1,N
-      x1 = xb(j,N) - x
-      if ( almost_equal(x1,zero) ) then
-        val = fval(j)
-        return
-      end if
-      t1 = wb(j,N)/x1
-      A = A + t1 * fval(j)
-      F = F + t1
-    end do
-    val = A/F
-  end subroutine lagbary
-
-  pure subroutine lagbary_wderiv(x,dir,fval,Npts,val,dval)
-    real(dp),               intent(in)  :: x
-    integer,                intent(in)  :: dir
-    integer,  dimension(:), intent(in)  :: Npts
-    real(dp), dimension(:), intent(in)  :: fval
-    real(dp),               intent(out) :: val, dval
-    real(dp) :: A, B, C, F
-    real(dp) :: x1, t1, t2, FF, AC
-    integer :: j, N
-    A = zero
-    B = zero
-    C = zero
-    F = zero
-    N = Npts(dir)
-    do j = 1,N
-      x1 = xb(j,N) - x
-      if ( almost_equal(x1,zero) ) then
-        val = fval(j)
-        dval = dot_product( Dmat(j,1:N,N,1), fval )
-        return
-      end if
-      t1 = wb(j,N)/x1
-      A = A + t1 * fval(j)
-      F = F + t1
-      t2 = t1/x1
-      B = B + t2 * fval(j)
-      C = C + t2
-    end do
-    val = A/F
-    FF = F*F
-    AC = A*C
-    dval = (B * F - AC)/FF
-  end subroutine lagbary_wderiv
-
-  pure subroutine lagbary_wderiv2(x,dir,fval,Npts,val,dval,d2val)
-    real(dp),               intent(in)  :: x
-    integer,                intent(in)  :: dir
-    integer,  dimension(:), intent(in)  :: Npts
-    real(dp), dimension(:), intent(in)  :: fval
-    real(dp),               intent(out) :: val, dval, d2val
-    real(dp) :: A, B, C, D, E, F
-    real(dp) :: x1, t1, t2, t3, FF, AC
-    integer :: j, N
-    A = zero
-    B = zero
-    C = zero
-    D = zero
-    E = zero
-    F = zero
-    N = Npts(dir)
-    do j = 1,N
-      x1 = xb(j,N) - x
-      if ( almost_equal(x1,zero) ) then
-        val   = fval(j)
-        dval  = dot_product( Dmat(j,1:N,N,1), fval )
-        d2val = dot_product( Dmat(j,1:N,N,2), fval )
-        return
-      end if
-      t1 = wb(j,N)/x1
-      A = A + t1 * fval(j)
-      F = F + t1
-      t2 = t1/x1
-      B = B + t2 * fval(j)
-      C = C + t2
-      t3 = t2/x1
-      D = D + t3 * fval(j)
-      E = E + t3
-    end do
-    val = A/F
-    FF = F*F
-    AC = A*C
-    dval = (B * F - AC)/FF
-    d2val = ( two * D ) / F - ( two * E * A ) / FF - ( two * B * C ) / FF      &
-          + ( two * C * AC ) / ( FF * F )
-  end subroutine lagbary_wderiv2
-
-  pure subroutine lagbary_2D(x,fval,Npts,val)
-    real(dp), dimension(2),   intent(in)  :: x
-    real(dp), dimension(:,:), intent(in)  :: fval
-    integer,  dimension(2),   intent(in)  :: Npts
-    real(dp),                 intent(out) :: val
-    real(dp), dimension(size(fval,2)) :: tmp
-    integer :: j
-    do j = 1,Npts(2)
-      call lagbary( x(1), 1, fval(:,j), Npts, tmp(j) )
-    end do
-    call lagbary( x(2), 2, tmp, Npts, val )
-  end subroutine lagbary_2D
-
-  pure subroutine lagbary_2D_wgrad(x,fval,Npts,val,grad)
-    real(dp), dimension(2),   intent(in)  :: x
-    real(dp), dimension(:,:), intent(in)  :: fval
-    integer,  dimension(2),   intent(in)  :: Npts
-    real(dp),                 intent(out) :: val
-    real(dp), dimension(2),   intent(out) :: grad
-    real(dp), dimension(size(fval,2)) :: tmp, gtmp
-    integer :: j
-    do j = 1,Npts(2)
-      call lagbary_wderiv( x(1), 1, fval(:,j), Npts, tmp(j), gtmp(j) )
-    end do
-    call lagbary_wderiv( x(2), 2,  tmp, Npts, val, grad(2) )
-    call lagbary(        x(2), 2, gtmp, Npts,      grad(1) )
-  end subroutine lagbary_2D_wgrad
-
-  pure subroutine lagbary_2D_whess(x,fval,Npts,val,grad,hess)
-    real(dp), dimension(2),   intent(in)  :: x
-    real(dp), dimension(:,:), intent(in)  :: fval
-    integer,  dimension(2),   intent(in)  :: Npts
-    real(dp),                 intent(out) :: val
-    real(dp), dimension(2),   intent(out) :: grad
-    real(dp), dimension(3),   intent(out) :: hess
-    real(dp), dimension(size(fval,2)) :: tmp, gtmp, htmp
-    integer :: j
-    do j = 1,Npts(2)
-      call lagbary_wderiv2( x(1), 1, fval(:,j), Npts, tmp(j), gtmp(j), htmp(j) )
-    end do
-    call lagbary_wderiv2( x(2), 2,  tmp, Npts, val, grad(2), hess(3) )
-    call lagbary_wderiv(  x(2), 2, gtmp, Npts,      grad(1), hess(2) )
-    call lagbary(         x(2), 2, htmp, Npts,               hess(1) )
-  end subroutine lagbary_2D_whess
-
-  pure subroutine lagbary_3D(x,fval,Npts,val)
-    real(dp), dimension(3),     intent(in)  :: x
-    real(dp), dimension(:,:,:), intent(in)  :: fval
-    integer,  dimension(3),     intent(in)  :: Npts
-    real(dp),                   intent(out) :: val
-    real(dp), dimension(size(fval,2),size(fval,3)) :: tmp
-    real(dp), dimension(size(fval,3)) :: tmp2
-    integer :: k, j
-    do k = 1,Npts(3)
-      do j = 1,Npts(2)
-        call lagbary( x(1), 1, fval(:,j,k), Npts, tmp(j,k) )
-      end do
-    end do
-    do k = 1,Npts(3)
-      call lagbary( x(2), 2, tmp(:,k), Npts, tmp2(k) )
-    end do
-    call lagbary( x(3), 3, tmp2, Npts, val )
-  end subroutine lagbary_3D
-
-  pure subroutine lagbary_3D_wgrad(x,fval,Npts,val,grad)
-    real(dp), dimension(3),     intent(in)  :: x
-    real(dp), dimension(:,:,:), intent(in)  :: fval
-    integer,  dimension(3),     intent(in)  :: Npts
-    real(dp),                   intent(out) :: val
-    real(dp), dimension(3),     intent(out) :: grad
-    real(dp), dimension(size(fval,2),size(fval,3)) :: tmp, gtmp0
-    real(dp), dimension(size(fval,3)) :: tmp2, gtmp1, gtmp2
-    integer :: k, j
-    do k = 1,Npts(3)
-      do j = 1,Npts(2)
-        call lagbary_wderiv( x(1), 1, fval(:,j,k), Npts, tmp(j,k), gtmp0(j,k) )
-      end do
-    end do
-    do k = 1,Npts(3)
-      call lagbary_wderiv( x(2), 2,   tmp(:,k), Npts, tmp2(k), gtmp2(k) )
-      call lagbary(        x(2), 2, gtmp0(:,k), Npts, gtmp1(k) )
-    end do
-    call lagbary_wderiv( x(3), 3,  tmp2, Npts, val, grad(3) )
-    call lagbary(        x(3), 3, gtmp2, Npts,      grad(2) )
-    call lagbary(        x(3), 3, gtmp1, Npts,      grad(1) )
-  end subroutine lagbary_3D_wgrad
-
-  pure subroutine lagbary_3D_whess(x,fval,Npts,val,grad,hess)
-    real(dp), dimension(3),     intent(in)  :: x
-    real(dp), dimension(:,:,:), intent(in)  :: fval
-    integer,  dimension(3),     intent(in)  :: Npts
-    real(dp),                   intent(out) :: val
-    real(dp), dimension(3),     intent(out) :: grad
-    real(dp), dimension(6),     intent(out) :: hess
-    real(dp), dimension(size(fval,2),size(fval,3)) :: tmp, gtmp, htmp
-    real(dp), dimension(size(fval,3)) :: tmp1, gtmp1, gtmp2, htmp1, htmp2, htmp3
-    integer :: k, j
-    do k = 1,Npts(3)
-      do j = 1,Npts(2)
-        call lagbary_wderiv2( x(1), 1, fval(:,j,k), Npts, tmp(j,k), gtmp(j,k), htmp(j,k) )
-      end do
-    end do
-    do k = 1,Npts(3)
-      call lagbary_wderiv2( x(2), 2,  tmp(:,k), Npts, tmp1(k), gtmp2(k), htmp3(k) )
-      call lagbary_wderiv(  x(2), 2, gtmp(:,k), Npts,          gtmp1(k), htmp2(k) )
-      call lagbary(         x(2), 2, htmp(:,k), Npts,                    htmp1(k) )
-    end do
-    call lagbary_wderiv2( x(3), 3,  tmp1, Npts, val, grad(3), hess(6) )
-    call lagbary_wderiv(  x(3), 3, gtmp2, Npts,      grad(2), hess(5) )
-    call lagbary(         x(3), 3, htmp3, Npts,               hess(4) )
-    call lagbary_wderiv(  x(3), 3, gtmp1, Npts,      grad(1), hess(3) )
-    call lagbary(         x(3), 3, htmp2, Npts,               hess(2) )
-    call lagbary(         x(3), 3, htmp1, Npts,               hess(1) )
-  end subroutine lagbary_3D_whess
-
-  pure function covariant_base_vectors_3D(point,X1,X2,X3) result(a)
+  pure function covariant_base_vectors_3D(this,point,X1,X2,X3) result(a)
+    class(interpolant_t),       intent(in) :: this
     real(dp), dimension(3),     intent(in) :: point
     real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
     real(dp), dimension(3,3) :: a
     real(dp) :: junk
     integer, dimension(3) :: Npts
     Npts = shape(X1)
-    call lagbary_3D_wgrad(point,X1,Npts,junk,a(1,:))
-    call lagbary_3D_wgrad(point,X2,Npts,junk,a(2,:))
-    call lagbary_3D_wgrad(point,X3,Npts,junk,a(3,:))
+    call this%lagbary_3D_wgrad(point,X1,Npts,junk,a(1,:))
+    call this%lagbary_3D_wgrad(point,X2,Npts,junk,a(2,:))
+    call this%lagbary_3D_wgrad(point,X3,Npts,junk,a(3,:))
   end function covariant_base_vectors_3D
 
-  function contravariant_base_vectors_3D(point,X1,X2,X3) result(a)
+  pure function contravariant_base_vectors_3D(this,point,X1,X2,X3) result(a)
+    class(interpolant_t),       intent(in) :: this
     real(dp), dimension(3),     intent(in) :: point
     real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
     real(dp), dimension(3,3) :: a
     real(dp) :: J
-    a = calc_grid_metrics(point,X1,X2,X3)
-    J = jacobian_determinant_3D(point,X1,X2,X3)
+    a = this%calc_grid_metrics(point,X1,X2,X3)
+    J = this%jacobian_determinant_3D(point,X1,X2,X3)
     a = a / J
   end function contravariant_base_vectors_3D
 
-  function calc_grid_metrics(point,X1,X2,X3) result(Ja)
-    use pointers, only : array_ptr_3D_real
-    real(dp), dimension(3), intent(in) :: point
-    real(dp), dimension(:,:,:), intent(in), target :: X1, X2, X3
-    real(dp), dimension(3,3) :: Ja
-    real(dp), dimension(size(X1,1),size(X1,2),size(X1,3)) :: X_l, X_m, tmp
-    type(array_ptr_3D_real), dimension(3) :: X
-    integer, dimension(3) :: Npts
-    integer :: i
-    real(dp) :: junk
-    real(dp), dimension(3) :: dX_l, dX_m, dd1, dd2, dd3
-    Ja = zero
-    X(1)%p => X1
-    X(2)%p => X2
-    X(3)%p => X3
-    Npts = shape(X1)
-    do i = 1,3
-      X_l = X(mod(4+i,3)+1)%p
-      X_m = X(mod(3+i,3)+1)%p
-      call lagbary_3D_wgrad( point, X_l, Npts, junk, dX_l )
-      call lagbary_3D_wgrad( point, X_m, Npts, junk, dX_m )
-      tmp = X_l*dX_m(1) - X_m*dX_l(1)
-      call lagbary_3D_wgrad( point, tmp, Npts, junk, dd1 )
-      tmp = X_l*dX_m(2) - X_m*dX_l(2)
-      call lagbary_3D_wgrad( point, tmp, Npts, junk, dd2 )
-      tmp = X_l*dX_m(3) - X_m*dX_l(3)
-      call lagbary_3D_wgrad( point, tmp, Npts, junk, dd3 )
-      Ja(i,1) = -half*( dd3(2) - dd2(3) );
-      Ja(i,2) = -half*( dd1(3) - dd3(1) );
-      Ja(i,3) = -half*( dd2(1) - dd1(2) );
-    end do
-    nullify( X(1)%p, X(2)%p, X(3)%p ) ! may not be necessary
-  end function calc_grid_metrics
-
-
-  pure function normal_vectors(point,X1,X2,X3) result(Nvec)
-    use math, only : cross_product, vector_norm
-    implicit none
-    real(dp), dimension(3), intent(in) :: point
+  pure function normal_vectors(this,point,X1,X2,X3) result(Nvec)
+    use math, only : cross_product
+    class(interpolant_t),       intent(in) :: this
+    real(dp), dimension(3),     intent(in) :: point
     real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
     real(dp), dimension(3,3) :: Nvec
     integer, dimension(3) :: Npts
     real(dp), dimension(3,3) :: A
     real(dp) :: junk
     Npts = shape(X1)
-    call lagbary_3D_wgrad(point,X1,Npts,junk,A(:,1))
-    call lagbary_3D_wgrad(point,X2,Npts,junk,A(:,2))
-    call lagbary_3D_wgrad(point,X3,Npts,junk,A(:,3))
+    call this%lagbary_3D_wgrad(point,X1,Npts,junk,A(:,1))
+    call this%lagbary_3D_wgrad(point,X2,Npts,junk,A(:,2))
+    call this%lagbary_3D_wgrad(point,X3,Npts,junk,A(:,3))
 
     Nvec(:,1) = cross_product(A(:,2),A(:,3))
     Nvec(:,2) = cross_product(A(:,1),A(:,3))
     Nvec(:,3) = cross_product(A(:,1),A(:,2))
 
-    Nvec(:,1) = Nvec(:,1)/vector_norm(Nvec(:,1))
-    Nvec(:,2) = Nvec(:,2)/vector_norm(Nvec(:,2))
-    Nvec(:,3) = Nvec(:,3)/vector_norm(Nvec(:,3))
+    Nvec(:,1) = Nvec(:,1)/norm2(Nvec(:,1))
+    Nvec(:,2) = Nvec(:,2)/norm2(Nvec(:,2))
+    Nvec(:,3) = Nvec(:,3)/norm2(Nvec(:,3))
   end function normal_vectors
 
-  pure function jacobian_determinant_2D(point,X1,X2,X3) result(Jac)
-    implicit none
-    real(dp), dimension(2), intent(in) :: point
+  pure function jacobian_determinant_2D(this,point,X1,X2,X3) result(Jac)
+    class(interpolant_t),     intent(in) :: this
+    real(dp), dimension(2),   intent(in) :: point
     real(dp), dimension(:,:), intent(in) :: X1, X2, X3
     real(dp) :: Jac, junk
     integer, dimension(2) :: Npts
     real(dp), dimension(2,3) :: A
     Npts = shape(X1)
-    call lagbary_2D_wgrad(point,X1,Npts,junk,A(:,1))
-    call lagbary_2D_wgrad(point,X2,Npts,junk,A(:,2))
-    call lagbary_2D_wgrad(point,X3,Npts,junk,A(:,3))
+    call this%lagbary_2D_wgrad(point,X1,Npts,junk,A(:,1))
+    call this%lagbary_2D_wgrad(point,X2,Npts,junk,A(:,2))
+    call this%lagbary_2D_wgrad(point,X3,Npts,junk,A(:,3))
     Jac = A(1,1)*A(2,2) - A(1,2)*A(2,1)
   end function jacobian_determinant_2D
 
-  pure function jacobian_determinant_3D(point,X1,X2,X3) result(Jac)
-    implicit none
-    real(dp), dimension(3), intent(in) :: point
+  pure function jacobian_determinant_3D(this,point,X1,X2,X3) result(Jac)
+    class(interpolant_t),       intent(in) :: this
+    real(dp), dimension(3),     intent(in) :: point
     real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
     real(dp) :: Jac, junk
     integer, dimension(3) :: Npts
     real(dp), dimension(3,3) :: A
     Npts = shape(X1)
-    call lagbary_3D_wgrad(point,X1,Npts,junk,A(:,1))
-    call lagbary_3D_wgrad(point,X2,Npts,junk,A(:,2))
-    call lagbary_3D_wgrad(point,X3,Npts,junk,A(:,3))
+    call this%lagbary_3D_wgrad(point,X1,Npts,junk,A(:,1))
+    call this%lagbary_3D_wgrad(point,X2,Npts,junk,A(:,2))
+    call this%lagbary_3D_wgrad(point,X3,Npts,junk,A(:,3))
     Jac = A(1,1)*A(2,2)*A(3,3) + A(2,1)*A(3,2)*A(1,3) + A(3,1)*A(1,2)*A(2,3) &
         - A(3,1)*A(2,2)*A(1,3) - A(2,1)*A(1,2)*A(3,3) - A(1,1)*A(3,2)*A(2,3)
   end function jacobian_determinant_3D
 
-end module lagrange_interpolation
+  ! pure function jacobian_determinant_3D_face(this,point,X1,X2,X3,dir1,dir2) result(Jac)
+  !   class(interpolant_t),       intent(in) :: this
+  !   real(dp), dimension(3),     intent(in) :: point
+  !   real(dp), dimension(:,:,:), intent(in) :: X1, X2, X3
+  !   logical,  dimension(:,:,:), intent(in) :: mask
+  !   integer,                    intent(in) :: dir1, dir2
+  !   real(dp) :: Jac
+  !   real(dp), dimension(size(X1,dir1),size(X1,dir2)) :: X1_tmp, X2_tmp, X3_tmp
+  !   integer :: i,j, Ni, Nj
+
+  !   Ni = size(X1,dir1)
+  !   Nj = size(X1,dir2)
+
+  !   do j = 1,
+  !   X1_tmp = 
+
+  ! end function jacobian_determinant_3D_face
+
+end module barycentric_interpolant_derived_type
 
 program main
-  use lagrange_interpolation, only : generate_1D_barycentric_info, destroy_1D_barycentric_info
-  call generate_1D_barycentric_info()
-  call destroy_1D_barycentric_info()
+  use barycentric_interpolant_derived_type, only : interpolant_t
+
+  type(interpolant_t) :: interp
+
+  interp = interpolant_t(10)
+
+  write(*,*) 'Here'
+
+  call interp%destroy()
 
 end program main
