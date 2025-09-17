@@ -178,6 +178,7 @@ module index_conversion
   public :: local2global, local2global_bnd, local2global_ghost
   public :: in_bound, cell_face_nbors
   public :: get_face_idx_from_id
+  public :: get_reshape_indices
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
@@ -337,7 +338,85 @@ contains
     face_idx = idx + face_offset
   end subroutine get_face_idx_from_id
 
+  pure subroutine get_reshape_indices( sz_in, loc, sz_out, sz_cnt, idx_start, idx_end )
+    integer, dimension(:),           intent(in)  :: sz_in
+    integer, dimension(size(sz_in)), intent(in)  :: loc
+    integer, dimension(size(sz_in)), intent(out) :: sz_out
+    integer,                         intent(out) :: sz_cnt
+    integer, dimension(size(sz_in)), intent(out) :: idx_start
+    integer, dimension(size(sz_in)), intent(out) :: idx_end
+
+    logical, dimension(size(sz_in)) :: lo, hi, varies
+
+    lo     = (loc==0)
+    hi     = (loc==1)
+    varies = (loc==2)
+    sz_out    = 1
+    sz_cnt    = count(varies)
+    sz_out(1:sz_cnt) = pack(sz_in,varies)
+    idx_start = 1
+    idx_end   = 1
+
+    where ( lo .or. varies ) idx_start = 1
+    where ( hi             ) idx_start = sz_in
+    where ( lo             ) idx_end   = 1
+    where ( hi .or. varies ) idx_end   = sz_in
+
+  end subroutine get_reshape_indices
+
 end module index_conversion
+
+module reshape_array
+  use set_precision, only : dp
+  implicit none
+  private
+  public :: extract_1D_slice_from_3D_array
+  public :: extract_2D_slice_from_3D_array
+contains
+
+  pure function extract_1D_slice_from_3D_array(A,lo,hi,sz) result(slice)
+    use index_conversion, only : get_reshape_indices
+    real(dp), dimension(:,:,:), intent(in) :: A
+    integer,  dimension(3),     intent(in) :: lo, hi
+    integer,                   intent(in) :: sz
+    real(dp), dimension(sz) :: slice
+    ! integer :: i, j, k, cnt
+
+    slice = reshape( A(lo(1):hi(1),lo(2):hi(2),lo(3):hi(3)), [sz] )
+    ! cnt = 0
+    ! do k = lo(3),hi(3)
+    !   do j = lo(2),hi(2)
+    !     do i = lo(1),hi(1)
+    !       cnt = cnt + 1
+    !       slice(cnt) = A(i,j,k)
+    !     end do
+    !   end do
+    ! end do
+  end function extract_1D_slice_from_3D_array
+
+  pure function extract_2D_slice_from_3D_array(A,lo,hi,sz) result(slice)
+    use index_conversion, only : get_reshape_indices
+    real(dp), dimension(:,:,:), intent(in) :: A
+    integer,  dimension(3),     intent(in) :: lo, hi
+    integer,  dimension(2),     intent(in) :: sz
+    real(dp), dimension(sz(1),sz(2)) :: slice
+    ! real(dp), dimension(product(sz)) :: slice_tmp
+    ! integer :: i, j, k, cnt
+
+    slice = reshape( A(lo(1):hi(1),lo(2):hi(2),lo(3):hi(3)), sz )
+    ! cnt = 0
+    ! do k = lo(3),hi(3)
+    !   do j = lo(2),hi(2)
+    !     do i = lo(1),hi(1)
+    !       cnt = cnt + 1
+    !       slice_tmp(cnt) = A(i,j,k)
+    !     end do
+    !   end do
+    ! end do
+    ! slice = reshape(slice_tmp,sz)
+  end function extract_2D_slice_from_3D_array
+
+end module reshape_array
 
 module combinatorics
   implicit none
@@ -653,18 +732,13 @@ module barycentric_interpolant_derived_type
     procedure,         pass   :: lagbary_3D, lagbary_3D_wgrad, lagbary_3D_whess
     procedure, public, pass   :: calc_grid_metrics, calc_grid_metrics_alt
     procedure, public, pass   :: normal_vectors
-    procedure, public, pass   :: map_point => map_point_3D_curve, map_point_3D_surface, map_point_3D_volume
+    ! procedure, public, pass   :: map_point_3D
+    procedure, public, pass   :: map_point_3D_curve, map_point_3D_surface, map_point_3D_volume
   end type interpolant_t
 
   interface interpolant_t
     procedure constructor
   end interface interpolant_t
-
-  ! interface map_point
-  !   module procedure map_point_3D_curve
-  !   module procedure map_point_3D_surface
-  !   module procedure map_point_3D_volume
-  ! end interface map_point
 
 contains
 
@@ -1096,13 +1170,13 @@ contains
     dS = norm2(dval)
   end subroutine map_point_3D_curve
 
-  pure subroutine map_point_3D_surface(this,point,X1,X2,X3,xyz,dA)
+  pure subroutine map_point_3D_surface(this,point,X1,X2,X3,xyz,dS)
     use math, only : cross_product
     class(interpolant_t),     intent(in)  :: this
     real(dp), dimension(2),   intent(in)  :: point ! [u,v]
     real(dp), dimension(:,:), intent(in)  :: X1, X2, X3
     real(dp), dimension(3),   intent(out) :: xyz
-    real(dp),                 intent(out) :: dA
+    real(dp),                 intent(out) :: dS
     integer,  dimension(2) :: Npts
     real(dp), dimension(2) :: tmp
     real(dp), dimension(3) :: drdu, drdv
@@ -1113,24 +1187,60 @@ contains
     drdu(2) = tmp(1); drdv(2) = tmp(2)
     call this%lagbary_2D_wgrad(point,X3,Npts,xyz(3),tmp)
     drdu(3) = tmp(1); drdv(3) = tmp(2)
-    dA = norm2( cross_product(drdu,drdv) )
+    dS = norm2( cross_product(drdu,drdv) )
   end subroutine map_point_3D_surface
 
-  pure subroutine map_point_3D_volume(this,point,X1,X2,X3,xyz,dV)
+  pure subroutine map_point_3D_volume(this,point,X1,X2,X3,xyz,dS)
     use math, only : det_3x3
     class(interpolant_t),       intent(in)  :: this
     real(dp), dimension(3),     intent(in)  :: point ! [xi,eta,zeta]
     real(dp), dimension(:,:,:), intent(in)  :: X1, X2, X3
     real(dp), dimension(3),     intent(out) :: xyz
-    real(dp),                   intent(out) :: dV
+    real(dp),                   intent(out) :: dS
     integer, dimension(3) :: Npts
     real(dp), dimension(3,3) :: A
     Npts = shape(X1)
     call this%lagbary_3D_wgrad(point,X1,Npts,xyz(1),A(:,1))
     call this%lagbary_3D_wgrad(point,X2,Npts,xyz(2),A(:,2))
     call this%lagbary_3D_wgrad(point,X3,Npts,xyz(3),A(:,3))
-    dV = det_3x3(A)
+    dS = det_3x3(A)
   end subroutine map_point_3D_volume
+
+  ! pure subroutine map_point_3D(this,point,X1,X2,X3,xyz,dS,status)
+  !   use set_constants, only : zero
+  !   class(interpolant_t),    intent(in)  :: this
+  !   real(dp), dimension(:),  intent(in)  :: point
+  !   real(dp), dimension(..), intent(in)  :: X1, X2, X3
+  !   real(dp), dimension(3),  intent(out) :: xyz
+  !   real(dp),                intent(out) :: dS
+  !   integer, optional,       intent(out) :: status
+
+  !   select rank(X1)
+  !   rank(0)
+  !     select rank(X2); rank(0); select rank(X3); rank(0)
+  !       xyz = [X1,X2,X3]
+  !       dS  = zero
+  !     end select; end select
+  !     if (present(status)) status = 0; return
+  !   rank(1)
+  !     select rank(X2); rank(1); select rank(X3); rank(1)
+  !       call map_point_3D_curve(this,point,X1,X2,X3,xyz,dS)
+  !     end select; end select
+  !   rank(2)
+  !     select rank(X2); rank(2); select rank(X3); rank(2) 
+  !       call map_point_3D_surface(this,point,X1,X2,X3,xyz,dS)
+  !     end select; end select
+  !   rank(3)
+  !     select rank(X2); rank(3); select rank(X3); rank(3) 
+  !       call map_point_3D_volume(this,point,X1,X2,X3,xyz,dS)
+  !     end select; end select
+  !   rank default
+  !     xyz = zero
+  !     dS  = zero
+  !     if (present(status)) status = -1; return
+  !   end select
+  !   if (present(status)) status = 1
+  ! end subroutine map_point_3D
 
 end module barycentric_interpolant_derived_type
 
@@ -1295,173 +1405,144 @@ contains
     end do
   end subroutine create_quad_ref_3D
 
-  pure subroutine map_quad_ref_to_physical_1D( x1nodes, x2nodes, x3nodes, mask, dir,    &
-                                               quad_ref, interpolant, quad_physical )
-    use set_constants,           only : zero, half
-    use math,                    only : vector_norm
+  pure subroutine map_quad_ref_to_physical_1D( X1, X2, X3, interpolant, quad_ref, quad_physical )
     use barycentric_interpolant_derived_type, only : interpolant_t
-    ! use reshape_array, only : extract_2D_slice_from_3D_array
-
-    real(dp), dimension(:,:,:), intent(in)  :: x1nodes, x2nodes, x3nodes
-    logical,  dimension(:,:,:), intent(in)  :: mask
-    integer,                    intent(in)  :: dir
-    type(quad_t),               intent(in)  :: quad_ref
-    type(interpolant_t),        intent(in)  :: interpolant
-    type(quad_t),               intent(out) :: quad_physical
-    integer  :: n, i
-    integer, dimension(1) :: Npts
+    real(dp), dimension(:), intent(in)  :: X1, X2, X3
+    type(interpolant_t),    intent(in)  :: interpolant
+    type(quad_t),           intent(in)  :: quad_ref
+    type(quad_t),           intent(out) :: quad_physical
     real(dp) :: dS
-    real(dp), dimension(3) :: node_diff
-
-    real(dp), dimension(3) :: tangent, normal, binormal
-    real(dp) :: kappa
-
-    continue
-    Npts = shape(x1nodes)
-
-    if( quad_ref%n_quad /= quad_physical%n_quad ) then
-      call quad_physical%destroy()
-      call quad_physical%create(quad_ref%n_quad)
-    end if
-
-    quad_physical%quad_pts = zero
+    integer  :: n
+    call quad_physical%create(quad_ref%n_quad)
     do n = 1,quad_ref%n_quad
-      ! call interpolant%map_point(quad_ref%quad_pts(dir,n), x1nodes, x2nodes, x3nodes, quad_physical%quad_pts(1,n)
-      quad_physical%quad_wts(n) = det_jac * quad_ref%quad_wts(n)
-
+      call interpolant%map_point_3D_curve( [quad_ref%quad_pts(1,n)], X1, X2, X3, quad_physical%quad_pts(:,n), dS )
+      quad_physical%quad_wts(n) = dS * quad_ref%quad_wts(n)
     end do
   end subroutine map_quad_ref_to_physical_1D
 
-  ! pure subroutine map_quad_ref_to_physical_2D( x1nodes, x2nodes, x3nodes,    &
-  !                                                 quad_ref, quad_physical )
-  !   use set_constants,           only : zero
-  !   use lagrange_interpolation,  only : lagbary_2D, jacobian_determinant
+  pure subroutine map_quad_ref_to_physical_2D( X1, X2, X3, interpolant, quad_ref, quad_physical )
+    use barycentric_interpolant_derived_type, only : interpolant_t
+    real(dp), dimension(:,:), intent(in)  :: X1, X2, X3
+    type(interpolant_t),      intent(in)  :: interpolant
+    type(quad_t),             intent(in)  :: quad_ref
+    type(quad_t),             intent(out) :: quad_physical
+    real(dp) :: dA
+    integer  :: n
+    call quad_physical%create(quad_ref%n_quad)
+    do n = 1,quad_ref%n_quad
+      call interpolant%map_point_3D_surface( quad_ref%quad_pts(1:2,n), X1, X2, X3, quad_physical%quad_pts(:,n), dA )
+      quad_physical%quad_wts(n) = dA * quad_ref%quad_wts(n)
+    end do
+  end subroutine map_quad_ref_to_physical_2D
 
-  !   real(dp),     dimension(:,:), intent(in)  :: x1nodes, x2nodes, x3nodes
-  !   type(quad_t),                 intent(in)  :: quad_ref
-  !   type(quad_t),                 intent(out) :: quad_physical
-  !   integer  :: n
-  !   real(dp) :: det_jac
-  !   integer,      dimension(2) :: Npts
-  !   continue
+  pure subroutine map_quad_ref_to_physical_3D( X1, X2, X3, interpolant, quad_ref, quad_physical )
+    use barycentric_interpolant_derived_type, only : interpolant_t
+    real(dp), dimension(:,:,:), intent(in)  :: X1, X2, X3
+    type(interpolant_t),        intent(in)  :: interpolant
+    type(quad_t),               intent(in)  :: quad_ref
+    type(quad_t),               intent(out) :: quad_physical
+    real(dp) :: dV
+    integer  :: n
+    call quad_physical%create(quad_ref%n_quad)
+    do n = 1,quad_ref%n_quad
+      call interpolant%map_point_3D_volume( quad_ref%quad_pts(1:3,n), X1, X2, X3, quad_physical%quad_pts(:,n), dV )
+      quad_physical%quad_wts(n) = dV * quad_ref%quad_wts(n)
+    end do
+  end subroutine map_quad_ref_to_physical_3D
 
-  !   Npts = shape(x1nodes)
-  !   if( quad_ref%n_quad /= quad_physical%n_quad ) then
-  !     call quad_physical%destroy()
-  !     call quad_physical%create(quad_ref%n_quad)
-  !   end if
 
-  !   quad_physical%quad_pts = zero
-  !   do n = 1,quad_ref%n_quad
-  !     call lagbary_2D( quad_ref%quad_pts(1:2,n), x1nodes, Npts, &
-  !                 quad_physical%quad_pts(  1,n) )
-  !     call lagbary_2D( quad_ref%quad_pts(1:2,n), x2nodes, Npts, &
-  !                 quad_physical%quad_pts(  2,n) )
-  !     call lagbary_2D( quad_ref%quad_pts(1:2,n), x3nodes, Npts, &
-  !                 quad_physical%quad_pts(  3,n) )
-  !     det_jac = jacobian_determinant( quad_ref%quad_pts(1:2,n), &
-  !                 x1nodes, x2nodes, x3nodes )
-  !     quad_physical%quad_wts(n) = abs(det_jac) * quad_ref%quad_wts(n)
-  !   end do
-  ! end subroutine map_quad_ref_to_physical_2D
 
-  ! pure subroutine map_quad_ref_to_physical_3D( x1nodes, x2nodes, x3nodes,    &
-  !                                                 quad_ref, quad_physical )
-  !   use set_constants,           only : zero
-  !   use lagrange_interpolation,  only : lagbary_3D, jacobian_determinant
-  !   real(dp), dimension(:,:,:), intent(in)  :: x1nodes, x2nodes, x3nodes
-  !   type(quad_t),               intent(in)  :: quad_ref
-  !   type(quad_t),               intent(out) :: quad_physical
-  !   integer  :: n
-  !   real(dp) :: det_jac
-  !   integer,  dimension(3) :: Npts
-  !   continue
+  pure subroutine map_quad_ref_to_physical( X1, X2, X3, loc, interpolant, quad_ref, quad_physical, status )
+    use set_constants,                        only : zero
+    use index_conversion,                     only : get_reshape_indices
+    use reshape_array,                        only : extract_1D_slice_from_3D_array, extract_2D_slice_from_3D_array
+    use barycentric_interpolant_derived_type, only : interpolant_t
+    real(dp), dimension(:,:,:), intent(in)  :: X1, X2, X3
+    integer,  dimension(3),     intent(in)  :: loc
+    type(interpolant_t),        intent(in)  :: interpolant
+    type(quad_t),               intent(in)  :: quad_ref
+    type(quad_t),               intent(out) :: quad_physical
+    integer, optional,          intent(out) :: status
+    real(dp), allocatable, dimension(:,:) :: X1_tmp, X2_tmp, X3_tmp
+    integer, dimension(3) :: idx_start, idx_end, sz_in, sz_out
+    integer  :: sz_cnt
+    if (present(status)) status = 1
+    sz_in = shape(X1)
+    call get_reshape_indices(sz_in, loc, sz_out, sz_cnt, idx_start, idx_end )
+    select case(sz_cnt)
+    case(1)
+      allocate( X1_tmp(sz_out(1),1), X2_tmp(sz_out(1),1), X3_tmp(sz_out(1),1) )
+      X1_tmp(:,1) = extract_1D_slice_from_3D_array(X1,idx_start,idx_end,sz_out(1))
+      X2_tmp(:,1) = extract_1D_slice_from_3D_array(X2,idx_start,idx_end,sz_out(1))
+      X3_tmp(:,1) = extract_1D_slice_from_3D_array(X3,idx_start,idx_end,sz_out(1))
+      call map_quad_ref_to_physical_1D(X1_tmp(:,1),X2_tmp(:,1),X3_tmp(:,1),interpolant,quad_ref,quad_physical)
+    case(2)
+      allocate( X1_tmp(sz_out(1),sz_out(2)), X2_tmp(sz_out(1),sz_out(2)), X3_tmp(sz_out(1),sz_out(2)) )
+      X1_tmp = extract_2D_slice_from_3D_array(X1,idx_start,idx_end,sz_out(1:2))
+      X2_tmp = extract_2D_slice_from_3D_array(X2,idx_start,idx_end,sz_out(1:2))
+      X3_tmp = extract_2D_slice_from_3D_array(X3,idx_start,idx_end,sz_out(1:2))
+      call map_quad_ref_to_physical_2D(X1_tmp,X2_tmp,X3_tmp,interpolant,quad_ref,quad_physical)
+    case(3)
+      call map_quad_ref_to_physical_3D(X1,X2,X3,interpolant,quad_ref,quad_physical)
+    case default
+      if (present(status)) status = -1
+    end select
 
-  !   Npts = shape(x1nodes)
-  !   if( quad_ref%n_quad /= quad_physical%n_quad ) then
-  !     call quad_physical%destroy()
-  !     call quad_physical%create(quad_ref%n_quad)
-  !   end if
+    if ( allocated(X1_tmp) ) deallocate( X1_tmp )
+    if ( allocated(X2_tmp) ) deallocate( X2_tmp )
+    if ( allocated(X3_tmp) ) deallocate( X3_tmp )
 
-  !   quad_physical%quad_pts = zero
-  !   do n = 1,quad_ref%n_quad
-  !     call lagbary_3D( quad_ref%quad_pts(:,n), x1nodes, Npts, &
-  !                     quad_physical%quad_pts(  1,n) )
-  !     call lagbary_3D( quad_ref%quad_pts(:,n), x2nodes, Npts, &
-  !                     quad_physical%quad_pts(  2,n) )
-  !     call lagbary_3D( quad_ref%quad_pts(:,n), x3nodes, Npts, &
-  !                     quad_physical%quad_pts(  3,n) )
-  !     det_jac = jacobian_determinant( quad_ref%quad_pts(:,n), &
-  !                                     x1nodes, x2nodes, x3nodes )
-  !     quad_physical%quad_wts(n) = det_jac * quad_ref%quad_wts(n)
-  !   end do
-  ! end subroutine map_quad_ref_to_physical_3D
+  end subroutine map_quad_ref_to_physical
 
-  ! pure subroutine map_cell_quad_points( dim, n_skip, quad_order, coords, mask, ref_quads, quad )
-  !   use quadrature_derived_type, only : map_quad_ref_to_physical_1D,           &
-  !                                       map_quad_ref_to_physical_2D,           &
-  !                                       map_quad_ref_to_physical_3D
-  !   integer,                                                        intent(in)    :: quad_order, dim
-  !   integer,      dimension(3),                                     intent(in)    :: n_skip
-  !   real(dp),     dimension(n_skip(1)+1,n_skip(1)+1,n_skip(1)+1,3), intent(in)    :: coords
-  !   logical,      dimension(n_skip(1)+1,n_skip(1)+1,n_skip(1)+1),   intent(in)    :: mask
-  !   type(quad_t), dimension(3),                                     intent(in)    :: ref_quads
-  !   type(quad_t),                                                   intent(inout) :: quad
-  !   real(dp),     dimension(product(n_skip+1)) :: Xtmp, Ytmp, Ztmp
-  !   integer :: n_mask, n_quad
-
-  !   n_mask = count(mask)
-
-  !   n_quad = ref_quads(1)%n_quad
-
-  !   Xtmp(1:n_mask) = pack(coords(:,:,:,1),mask)
-  !   Ytmp(1:n_mask) = pack(coords(:,:,:,2),mask)
-  !   Ztmp(1:n_mask) = pack(coords(:,:,:,3),mask)
-
-  !   select case(dim)
-  !   case(1)
-  !     call map_quad_ref_to_physical_1D( Xtmp(1:n_mask), &
-  !                                       Ytmp(1:n_mask), &
-  !                                       Ztmp(1:n_mask), &
-  !                                       ref_quads(1), quad )
-  !   case(2)
-  !     call map_quad_ref_to_physical_2D( reshape( Xtmp(1:n_mask), [n_quad, n_quad ] ), &
-  !                                       reshape( Ytmp(1:n_mask), [n_quad, n_quad ] ), &
-  !                                       reshape( Ztmp(1:n_mask), [n_quad, n_quad ] ), &
-  !                                       ref_quads(2), quad )
-  !   case(3)
-  !     call map_quad_ref_to_physical_3D( reshape( Xtmp(1:n_mask), [n_quad, n_quad, n_quad ] ), &
-  !                                       reshape( Ytmp(1:n_mask), [n_quad, n_quad, n_quad ] ), &
-  !                                       reshape( Ztmp(1:n_mask), [n_quad, n_quad, n_quad ] ), &
-  !                                       ref_quads(3), quad )
-  !   end select
-  ! end subroutine map_cell_quad_points
 end module quadrature_derived_type
 
-module reshape_array
-  use set_precision, only : dp
+module tmp
   implicit none
-  private
-  public :: extract_2D_slice_from_3D_array
 contains
+  subroutine print_reshape_indices(sz_in,loc)
+    use index_conversion, only : get_reshape_indices
+    integer, dimension(:), intent(in)  :: sz_in
+    integer, dimension(size(sz_in)), intent(in)  :: loc
+    integer, dimension(size(sz_in)) :: sz_out
+    integer                         :: sz_cnt
+    integer, dimension(size(sz_in)) :: idx_start
+    integer, dimension(size(sz_in)) :: idx_end
+    integer :: n_dim
+    character(len=100) :: fmt, fmt1, fmt2
 
+    n_dim = size(sz_in)
 
-  pure function extract_2D_slice_from_3D_array(A,mask,sz) result(slice)
-    use set_constants, only : zero
-    real(dp), dimension(:,:,:), intent(in) :: A
-    logical,  dimension(:,:,:), intent(in) :: mask
-    integer,  dimension(2),     intent(in) :: sz
-    real(dp), dimension(sz(1),sz(2)) :: slice, field
-    logical,  dimension(sz(1),sz(2)) :: mask2
-    field = zero
-    mask2 = .true.
-    slice = unpack( pack( A, mask ), mask2, field )
-  end function extract_2D_slice_from_3D_array
+    write(fmt1,'(I0,A)') n_dim, '(" ",I3)'
 
-end module reshape_array
+    fmt = '('//'"sz_in  = ["'//trim(adjustl(fmt1))//'"]"'//')'
+    write(*,fmt) sz_in
+
+    fmt = '('//'"loc    = ["'//trim(adjustl(fmt1))//'"]"'//')'
+    write(*,fmt) loc
+
+    call get_reshape_indices( sz_in, loc, sz_out, sz_cnt, idx_start, idx_end )
+
+    write(*,*)
+
+    write(fmt2,'(I0,A)') sz_cnt, '(" ",I3)'
+
+    fmt = '('//'"sz_out = ["'//trim(adjustl(fmt2))//'"]"'//')'
+    write(*,fmt) sz_out(1:sz_cnt)
+
+    fmt = '('//'"start  = ["'//trim(adjustl(fmt1))//'"]"'//')'
+    write(*,fmt) idx_start
+
+    fmt = '('//'"end    = ["'//trim(adjustl(fmt1))//'"]"'//')'
+    write(*,fmt) idx_end
+
+    write(*,*)
+
+  end subroutine print_reshape_indices
+end module tmp
 
 program main
   use barycentric_interpolant_derived_type, only : interpolant_t
+  use tmp, only : print_reshape_indices
 
   type(interpolant_t) :: interp
 
@@ -1470,5 +1551,8 @@ program main
   write(*,*) 'Here'
 
   call interp%destroy()
+
+  call print_reshape_indices([10,10,10],[2,1,2])
+
 
 end program main
