@@ -712,7 +712,7 @@ contains
 end module linspace_helper
 
 
-module barycentric_interpolant_derived_type
+module interpolant_derived_type
   use set_precision, only : dp
   use set_constants, only : zero, one, two, half
   implicit none
@@ -1242,7 +1242,7 @@ contains
   !   if (present(status)) status = 1
   ! end subroutine map_point_3D
 
-end module barycentric_interpolant_derived_type
+end module interpolant_derived_type
 
 module quadrature_derived_type
 
@@ -1406,7 +1406,7 @@ contains
   end subroutine create_quad_ref_3D
 
   pure subroutine map_quad_ref_to_physical_1D( X1, X2, X3, interpolant, quad_ref, quad_physical )
-    use barycentric_interpolant_derived_type, only : interpolant_t
+    use interpolant_derived_type, only : interpolant_t
     real(dp), dimension(:), intent(in)  :: X1, X2, X3
     type(interpolant_t),    intent(in)  :: interpolant
     type(quad_t),           intent(in)  :: quad_ref
@@ -1421,7 +1421,7 @@ contains
   end subroutine map_quad_ref_to_physical_1D
 
   pure subroutine map_quad_ref_to_physical_2D( X1, X2, X3, interpolant, quad_ref, quad_physical )
-    use barycentric_interpolant_derived_type, only : interpolant_t
+    use interpolant_derived_type, only : interpolant_t
     real(dp), dimension(:,:), intent(in)  :: X1, X2, X3
     type(interpolant_t),      intent(in)  :: interpolant
     type(quad_t),             intent(in)  :: quad_ref
@@ -1436,7 +1436,7 @@ contains
   end subroutine map_quad_ref_to_physical_2D
 
   pure subroutine map_quad_ref_to_physical_3D( X1, X2, X3, interpolant, quad_ref, quad_physical )
-    use barycentric_interpolant_derived_type, only : interpolant_t
+    use interpolant_derived_type, only : interpolant_t
     real(dp), dimension(:,:,:), intent(in)  :: X1, X2, X3
     type(interpolant_t),        intent(in)  :: interpolant
     type(quad_t),               intent(in)  :: quad_ref
@@ -1456,7 +1456,7 @@ contains
     use set_constants,                        only : zero
     use index_conversion,                     only : get_reshape_indices
     use reshape_array,                        only : extract_1D_slice_from_3D_array, extract_2D_slice_from_3D_array
-    use barycentric_interpolant_derived_type, only : interpolant_t
+    use interpolant_derived_type, only : interpolant_t
     real(dp), dimension(:,:,:), intent(in)  :: X1, X2, X3
     integer,  dimension(3),     intent(in)  :: loc
     type(interpolant_t),        intent(in)  :: interpolant
@@ -1541,7 +1541,7 @@ contains
 end module tmp
 
 program main
-  use barycentric_interpolant_derived_type, only : interpolant_t
+  use interpolant_derived_type, only : interpolant_t
   use tmp, only : print_reshape_indices
 
   type(interpolant_t) :: interp
